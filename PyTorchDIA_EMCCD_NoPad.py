@@ -60,21 +60,36 @@ def convert_to_tensor(image):
   return image
 
 
-def infer_kernel(R, I, flat, rdnoise, G, maxiter, FIM, alpha, convergence_plots, d, ks, speedy, tol, lr_kernel, lr_B, Newton_tol):
+def infer_kernel(R, I, flat, maxiter, FIM, convergence_plots, d, ks, speedy, tol, lr_kernel, lr_B, SD_steps, Newton_tol):
 
     '''
     # Arguments
     * 'R' (numpy.ndarray or torch.tensor): The reference image
     * 'I' (numpy.ndarray or torch.tensor): The data/target image
+    * 'NM' (numpy.ndarray or torch.tensor): The noise model 'image'
+    * 'init_kernel' (torch.tensor): Initial guess for the PSF-matching kernel
+    * 'init_B' (torch.tensor): Initial guess for the differential background parameter
+    * 'i' (int): Iteration number i.e. M_i estimate
 
-    # Keyword arguments - See DIA()
+    # Keyword arguments
+    * 'maxiter' (int): Maximum number of iterations for the optimisation
+    * 'alpha' (float): Strength of the L2 regularisation penalty
+    * 'FIM' (bool): Calculate parameter uncertanties from the Fisher Matrix
+    * 'convergence_plots' (bool): Plot parameter estimates vs steps after optimising
+    * 'd' (int): Polynomial of degree 'd' for fitting a spatially varying background
+    * 'ks' (int): kernel of size ks x ks, needs to be odd
+    * speedy (bool): If True, don't bother with linear transformation operation
+      i.e. to be used if we're solving for a scalar background parameter
+    * tol (float): Minimum relative change in parameter values before claiming convergence
+    * lr_kernel (float): Steepest descent learning rate for kernel
+    * lr_B (float): Steepest descent learning rate for background parameter(s)
+    * SD_steps (int): Number of gradient descent steps to talke before switching to quasi-Newton optimisation
     
     # returns
     * 'kernel' (numpy.ndarray): the (flipped) inferred kernel
     * 'inferred_bkg' (float): B_0 background term
     * 'fit' (numpy.ndarray): the spatially varying background (inferred_bkg == fit if d=0)
     '''
-    
     
     R, I = convert_to_tensor(R), convert_to_tensor(I)
     
@@ -89,12 +104,16 @@ def infer_kernel(R, I, flat, rdnoise, G, maxiter, FIM, alpha, convergence_plots,
         )
       )
 
+      '''
+      # Initialise kernel and bias
+      model[0].weight = torch.nn.Parameter(1e-3*torch.ones(model[0].weight.shape, requires_grad=True))
+      model[0].bias = torch.nn.Parameter(1e3*torch.ones(model[0].bias.shape, requires_grad=True))
+      '''
       # Initialise kernel and bias
       init_kernel_pixels = 1. / (ks**2) # ensures that the kernel sums to 1 at initialisation
       init_background = torch.median(I).item() # estimate for the 'sky' level of the target image
       model[0].weight = torch.nn.Parameter(init_kernel_pixels*torch.ones(model[0].weight.shape, requires_grad=True))
       model[0].bias = torch.nn.Parameter(init_background*torch.ones(model[0].bias.shape, requires_grad=True))
-
      
     
     else:
@@ -105,7 +124,8 @@ def infer_kernel(R, I, flat, rdnoise, G, maxiter, FIM, alpha, convergence_plots,
               self.conv = torch.nn.Conv2d(in_channels=1,
                               out_channels=1,
                               kernel_size=ks,
-                              padding = 0,
+                              padding = np.int((ks/2)-0.5),
+                              padding_mode = 'zeros',
                               bias=False)
               
               self.poly = torch.nn.Linear(2*d+1, 1, bias=False)
@@ -160,71 +180,37 @@ def infer_kernel(R, I, flat, rdnoise, G, maxiter, FIM, alpha, convergence_plots,
     if torch.cuda.is_available() is True:
       model = model.to(device)
 
-    # And if alpha != 0, construct the Laplacian to add as a prior
-    # to penalize the log-likelihood
-    if alpha != 0.:
-        Nk = model[0].weight[0][0].flatten().size()[0]# number of DBFs
-        print('Constructing Laplacian for square kernel with %d DBFs' % Nk)
-        
-        L = np.zeros((Nk, Nk))
-        
-        centre_bit = np.arange(1, np.sqrt(Nk)-1)
-        
-        # corners
-        L[0][0] = 2
-        L[-1][-1] = 2
-        L[np.int(np.sqrt(Nk)-1)][np.int(np.sqrt(Nk)-1)] = 2
-        L[Nk-np.int(np.sqrt(Nk))][Nk-np.int(np.sqrt(Nk))] = 2
-        
-        for u in range(0, Nk):
-            for v in range(0, Nk):
-                # diagonals
-                if u == v:
-                    # centre bit
-                    if np.sqrt(Nk) < u < Nk - np.sqrt(Nk) - 1 and u % np.sqrt(Nk) in centre_bit:
-                        L[u][v] = 4
-                    
-                    # rest of diags are 3
-                    elif L[u][v] != 2:
-                        L[u][v] = 3
-                
-                # off-diagonals        
-                elif u != v:
-                    if u == v+1:
-                        if (v+1) % np.sqrt(Nk) != 0:
-                            L[u][v] = -1
-                            L[v][u] = -1
-                            
-                    elif u == v + np.sqrt(Nk):
-                        L[u][v] = -1
-                        L[v][u] = -1
-    
-    
-        # convert L to tensor
-        L = torch.from_numpy(L).float()
-        # move L to cuda
-        if torch.cuda.is_available() is True:
-            L = L.to(device)
-            
-    # target image pixels
-    N_dat = I[0][0].flatten().size()[0]
-
     # Define the loss (our scalar objective function to optimise)
     # Sometimes referred to as the 'cost' in the ML literature
     class negative_log_likelihood(torch.nn.Module):
     
-        def forward(model, targ, w):
-            #var = torch.clamp(model, min=0.)/(G*flat) + (rdnoise/flat)**2
-            var = torch.clamp(model, min=0.) + rdnoise**2
-            chi2 = torch.sum((model - targ) ** 2 / var)
-            ln_sigma = torch.sum(torch.log(var))
-            nll = 0.5 * (chi2 + ln_sigma)
+        def forward(model, targ, flat, c):
+            #var = model + sigma0**2
+            #chi2 = torch.sum((model - targ) ** 2 / var)
+            #ln_sigma = torch.sum(torch.log(var))
+            #nll = 0.5 * (chi2 + ln_sigma)
 
-            # add laplacian prior on kernel pixels
-            if alpha != 0.:
-                vector = w[0][0].flatten()
-                prior = alpha * N_dat * (vector.t() @ L.t() @ L @ vector)
-                nll += prior
+            # Total gain, G, and EMCCD excess noise factor, E
+            G = 25.8/300.
+            E = 2
+
+            shot_noise = torch.clamp(model, min=1.)/(G*flat)
+            var = E*shot_noise
+
+            NM = torch.sqrt(var)
+            ln_sigma = torch.sum(torch.log(NM))
+           
+            # gaussian when (model - targ)/NM <= c
+            # absolute deviation when (model - targ)/NM > c
+            cond1 = torch.abs((model - targ)/NM) <= c
+            cond2 = torch.abs((model - targ)/NM) > c
+            inliers = ((model - targ)/NM)[cond1]
+            outliers = ((model - targ)/NM)[cond2]
+
+            l2 = 0.5*torch.sum(torch.pow(inliers, 2))
+            l1 = (c * torch.sum(torch.abs(outliers)) - (0.5 * c**2))
+
+            nll = l2 + l1 + ln_sigma
 
             return nll
 
@@ -250,13 +236,14 @@ def infer_kernel(R, I, flat, rdnoise, G, maxiter, FIM, alpha, convergence_plots,
                 
     
     optimizer_Newton = torch.optim.LBFGS(model.parameters(), tolerance_change=tol, history_size=10, line_search_fn=None)
+    #optimizer_Newton = torch.optim.LBFGS(model.parameters(), tolerance_change=tol, history_size=100, line_search_fn='strong_wolfe')
 
     # L-BFGS needs to evaulte the scalar objective function multiple times each call, and requires a
     # closure to be fed to opitmizer_Newton
     def closure():
       optimizer_Newton.zero_grad()
       y_pred = model(R)
-      loss = negative_log_likelihood.forward(y_pred, I, model[0].weight)
+      loss = negative_log_likelihood.forward(y_pred, I, flat, c)
       loss.backward()
       return loss
 
@@ -281,6 +268,13 @@ def infer_kernel(R, I, flat, rdnoise, G, maxiter, FIM, alpha, convergence_plots,
     print('Starting optimisation')
     for t in range(maxiter):
 
+        #if t < 150:
+        #  c = 10
+        #else:
+        #  c = 1.345
+        c = 1.345
+
+
         # flag to use steepest decent if relative change in loss
         # not below Newton_tol
         if use_Newton == False:
@@ -299,7 +293,7 @@ def infer_kernel(R, I, flat, rdnoise, G, maxiter, FIM, alpha, convergence_plots,
               y_pred = model(R, A)
       
           # compute the loss
-          loss = negative_log_likelihood.forward(y_pred, I, model[0].weight)
+          loss = negative_log_likelihood.forward(y_pred, I)
 
           scaler.scale(loss).backward()
           scaler.step(optimizer_Adam)
@@ -312,7 +306,7 @@ def infer_kernel(R, I, flat, rdnoise, G, maxiter, FIM, alpha, convergence_plots,
             y_pred = model(R, A)
       
           # compute the loss
-          loss = negative_log_likelihood.forward(y_pred, I, model[0].weight)
+          loss = negative_log_likelihood.forward(y_pred, I, flat, c)
          
           # clear gradients, compute gradients, take a single
           # steepest descent step
@@ -324,15 +318,15 @@ def infer_kernel(R, I, flat, rdnoise, G, maxiter, FIM, alpha, convergence_plots,
           losses.append(loss.detach())
           ts.append(t)
         
-        # don't take more than 250 Newton steps
-        elif use_Newton == True and t < SD_steps_taken + 250:
+        # don't take more than 1000 Newton steps
+        elif use_Newton == True and t < SD_steps_taken + 1000:
           # perform a single optimisation (quasi-Newton) step
           optimizer_Newton.step(closure)
 
           # compute and append new loss after the update
           # must be a way to improve this.... #
           y_pred = model(R)
-          loss = negative_log_likelihood.forward(y_pred, I, model[0].weight)
+          loss = negative_log_likelihood.forward(y_pred, I, flat, c)
           losses.append(loss.detach())
           ts.append(t)
           
@@ -344,7 +338,7 @@ def infer_kernel(R, I, flat, rdnoise, G, maxiter, FIM, alpha, convergence_plots,
         # Convergence reached if less than specified tol and more than 100
         # steps taken (guard against early stopping)
         if speedy is True:
-          if t>100 and abs((losses[-1] - losses[-2])/losses[-2]) < tol:
+          if t>300 and abs((losses[-1] - losses[-2])/losses[-2]) < tol:
             print('Converged!')
             print('Total steps taken:', t)
             try:
@@ -354,7 +348,7 @@ def infer_kernel(R, I, flat, rdnoise, G, maxiter, FIM, alpha, convergence_plots,
                 print('SD only')
             break
 
-          elif t>100 and abs((losses[-1] - losses[-2])/losses[-2]) < Newton_tol and use_Newton == False:
+          elif t>250 and abs((losses[-1] - losses[-2])/losses[-2]) < Newton_tol and use_Newton == False:
             use_Newton = True
             SD_steps_taken = t
             print('Switching to Quasi-Newton step after %d SD steps' % SD_steps_taken)
@@ -457,7 +451,7 @@ def infer_kernel(R, I, flat, rdnoise, G, maxiter, FIM, alpha, convergence_plots,
         y_pred = model(R)
       else:
         y_pred = model(R, A)
-      loss = negative_log_likelihood.forward(y_pred, I, model[0].weight)
+      loss = negative_log_likelihood.forward(y_pred, I, flat, c)
       logloss_grads = autograd.grad(loss, model.parameters(), create_graph=True, retain_graph=True)
       print('Building full Hessian...')
       full_hessian_time = time.time() 
@@ -508,17 +502,16 @@ def infer_kernel(R, I, flat, rdnoise, G, maxiter, FIM, alpha, convergence_plots,
 def DIA(R,
         I,
         flat,
-        rdnoise,
-        G,
+        read_noise = 0.,
         ks = 15,
         lr_kernel = 1e-2,
         lr_B = 1e1,
-        max_iterations = 10000,
-        poly_degree=0,
-        alpha = 0,
+        SD_steps = 100,
         Newton_tol = 1e-6,
-        tol = 1e-9,
+        poly_degree=0,
         fast=True,
+        tol = 1e-5,
+        max_iterations = 5000,
         fisher=False,
         show_convergence_plots=False):
   
@@ -529,21 +522,38 @@ def DIA(R,
   * 'flat' (numpy.ndarray): provided flat field for the images
 
   ## Keyword Arguments
+  * 'read_noise' (float): detector read noise (ADU), defeault = 0.
+  * 'unweighted' (bool): don't bother with a noise model, default=False
+  * 'n_samples' (int): If MC sampling, specify how many kernel and background solutions we want, default = 1
+  * 'full_image' (bool): Infer kernel for full image or MC sampled subregions, default=True
+  * 'display_stamps' (bool): Plot the input reference and target pair (either full image or subregions), default=False
+  * 'sky_subtract' (bool): Subtract the median pixel values from the input images, default=False
+  * 'iters' (int): Number of iterations (estimates of Model image) to perform, default = 3
   * 'ks' (int): Size of ks x ks kernel **Needs to be odd**, default=15
   * 'lr_kernel' (float): The learning rate for the parameters of the convolution kernel, default=1e-2
   * 'lr_B' (float): The learning rate for the parameters for the differential background solution, default=1e1
-  * 'max_iterations' (int): Maximum Number of optimisation steps
+  * 'SD_steps' (int): Number of gradient descent steps to talke before switching to quasi-Newton optimisation
   * 'poly_degree' (int): Degree of polynomial for background fit, default=0
-  * 'alpha' (float): Strength of Tikhonov smoothing on kernel, default = 0.
-  * 'Newton_tol' (float): tol at which to switch from steepest gradient descent to L-BFGS
-  * 'tol' (float): Minimum relative change in parameters for claiming convergence of kernel and background fit,
-     default = 1e-9
   * 'fast' (bool): Use in-built torch.nn.Conv2d function if True, which fits for a scalar background term.
      If False, we'll fit a polynomial of degree 'poly_degree' for the background, which requires an additional
      customised linear transformation operation, which is slower than the in-built function even for 0 degree
      polynomial, default = True.
+  * 'tol' (float): Minimum relative change in parameters for claiming convergence of kernel and background fit,
+     default = 1e-5
+  * 'alpha' (float): Strength of L2 regularisation penalty on kernel solution, default = 0.
+  * 'max_iterations' (int): Maximum number of iterations in optimisation, default=5000
   * 'fisher' (bool): Output kernel and background uncertainty estimates calculated from Fisher Matrix, default=False
-  * 'show_convergence_plots' (bool): Plot Loss vs steps in optimisation procedure, default=False
+  * 'show_convergence_plots' (bool): Plot parameter estimates vs steps in optimisation procedure, default=False
+  * 'display_D' (bool): Plot the difference image(s), default = False
+  * 'k' (int): sigma clip to apply to normalised residuals at each iteration,
+     default=5 **WARNING:Highly sensitve to choice of noise model!!
+     If you're not sure, set this to be very large to avoid overly severe clipping!**
+  * 'precision' (int): Decimal place precision at which we claim convergence of kernel solution,
+     default=3 i.e. if change in photometric scale factor at next iteration < 0.001 we've converged
+  * 'display_masked_stamps' (bool): Plot the sigma clipped images, default=False
+  * 'display_M' (bool): Plot the model image(s)
+  * 'display_kernel' (bool): Plot the inferred kernel(s)
+  * 'display_B* (bool): Plot the inferred spatially varying background(s)
   
   ## Returns
   * 'kernel' (numpy.ndarray): the convolution kernel
@@ -557,6 +567,7 @@ def DIA(R,
   hwidth = np.int((ks - 1) / 2)
   nx, ny = I.shape
   I = I[hwidth:nx-hwidth, hwidth:nx-hwidth]
+  flat = flat[hwidth:nx-hwidth, hwidth:nx-hwidth]
     
   #### Convert numpy images to tensors and move to GPU
   I, R, flat = convert_to_tensor(I), convert_to_tensor(R), convert_to_tensor(flat)
@@ -568,16 +579,16 @@ def DIA(R,
     R = R.to(device)
     I = I.to(device)
     flat = flat.to(device)
+   
 
 
   print("--- Time to move data onto GPU: %s ---" % (time.time() - time_to_move_to_GPU))
 
 
 
-  kernel, B = infer_kernel(R, I, flat, rdnoise, G,
+  kernel, B = infer_kernel(R, I, flat, 
 				   maxiter=max_iterations,
 				   FIM=fisher,
-                   alpha = alpha,
 				   convergence_plots=show_convergence_plots,
 				   d = poly_degree,
 				   ks = ks,
@@ -585,6 +596,7 @@ def DIA(R,
 				   tol = tol,
 				   lr_kernel = lr_kernel,
 				   lr_B = lr_B,
+				   SD_steps = SD_steps,
 				   Newton_tol = Newton_tol)
 
 

@@ -473,9 +473,9 @@ def DIA(R,
   * 'loss_fn' (Pythonic function composed of torch.Tensors): The scalar objective function to minimise
 
   ## Keyword Arguments
-  * 'ks' (int): Size of ks x ks kernel **Needs to be odd**, default=15
-  * 'lr_kernel' (float): The learning rate for the parameters of the convolution kernel, default=1e-2
-  * 'lr_B' (float): The learning rate for the parameters for the differential background solution, default=1e1
+  * 'ks' (int): Size of ks x ks kernel **Must be odd**
+  * 'lr_kernel' (float): The learning rate for the parameters of the convolution kernel, default=1e-3
+  * 'lr_B' (float): The learning rate for the parameters for the differential background solution, default=1
   * 'max_iterations' (int): Maximum Number of optimisation steps
   * 'poly_degree' (int): Degree of polynomial for background fit, default=0
   * 'alpha' (float): Strength of LaPlacian smoothing on kernel, default = 0.
@@ -488,6 +488,7 @@ def DIA(R,
   ## Returns
   * 'kernel' (numpy.ndarray): the convolution kernel
   * 'B' (numpy.ndarray): the differential background
+  * 'model' (numpy.ndarray): the DIA image model
   '''
 
   start_time_total = time.time()
@@ -517,7 +518,7 @@ def DIA(R,
 
   print("--- Time to move data onto GPU: %s ---" % (time.time() - time_to_move_to_GPU))
 
-  kernel, B, y_pred = infer_kernel(R, I, flat, loss_fn,
+  kernel, B, model = infer_kernel(R, I, flat, loss_fn,
 				   maxiter=max_iterations,
 				   FIM=fisher,
                    alpha = alpha,
@@ -532,7 +533,7 @@ def DIA(R,
 
   print("--- Finished in a total of %s seconds ---" % (time.time() - start_time_total))
 
-  return kernel, B, y_pred
+  return kernel, B, model
 
 
 

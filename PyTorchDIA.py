@@ -190,6 +190,13 @@ def infer_kernel(R, I, flat, loss_fn, maxiter, FIM, alpha, convergence_plots, d,
             
     # target image pixels
     N_dat = I[0][0].flatten().size()[0]
+    
+    # adds laplacian prior on kernel pixels            
+    def add_Laplacian_prior(w, loss):
+        vector = w[0][0].flatten()
+        prior = alpha * N_dat * (vector.t() @ L.t() @ L @ vector)
+        loss += prior
+        return loss
 
 
     # Keep track of the progress of the optimisation
@@ -225,7 +232,15 @@ def infer_kernel(R, I, flat, loss_fn, maxiter, FIM, alpha, convergence_plots, d,
         y_pred = model(R)
       else:
         y_pred = model(R, A)      
+       
       loss = loss_fn(y_pred, I, flat)
+      
+      if alpha != 0:
+        try:
+            loss = add_Laplacian_prior(model[0].weight, loss)
+        except TypeError:
+            loss = add_Laplacian_prior(model.conv.weight, loss)
+      
       loss.backward()
       return loss
 
@@ -262,6 +277,13 @@ def infer_kernel(R, I, flat, loss_fn, maxiter, FIM, alpha, convergence_plots, d,
       
           # compute the loss
           loss = loss_fn(y_pred, I, flat)
+          
+          if alpha != 0:
+            try:
+                loss = add_Laplacian_prior(model[0].weight, loss)
+            except TypeError:
+                loss = add_Laplacian_prior(model.conv.weight, loss)
+           
          
           # clear gradients, compute gradients, take a single
           # steepest descent step
@@ -287,6 +309,14 @@ def infer_kernel(R, I, flat, loss_fn, maxiter, FIM, alpha, convergence_plots, d,
             y_pred = model(R, A)
       
           loss = loss_fn(y_pred, I, flat)
+          
+          if alpha != 0:
+            try:
+                loss = add_Laplacian_prior(model[0].weight, loss)
+            except TypeError:
+                loss = add_Laplacian_prior(model.conv.weight, loss)
+           
+         
           losses.append(loss.detach())
           ts.append(t)
           
@@ -409,6 +439,13 @@ def infer_kernel(R, I, flat, loss_fn, maxiter, FIM, alpha, convergence_plots, d,
       else:
         y_pred = model(R, A)
       loss = loss_fn(y_pred, I, flat)
+      
+      if alpha != 0:
+        try:
+            loss = add_Laplacian_prior(model[0].weight, loss)
+        except TypeError:
+            loss = add_Laplacian_prior(model.conv.weight, loss)
+            
       logloss_grads = autograd.grad(loss, model.parameters(), create_graph=True, retain_graph=True)
       print('Building full Hessian...')
       full_hessian_time = time.time() 
@@ -482,7 +519,7 @@ def DIA(R,
   * 'Newton_tol' (float): tol at which to switch from steepest gradient descent to L-BFGS
   * 'tol' (float): Minimum relative change in parameters for claiming convergence of kernel and background fit,
      default = 1e-9
-  * 'fisher' (bool): Output kernel and background uncertainty estimates calculated from Fisher Matrix, default=False
+  * 'fisher' (bool): Output kernel and background uncertainty estimates calculated from Fisher Matrix, default=False WARNING: THIS HAS NOT BEEN TESTED FOR CURRENT CODE VERSION
   * 'show_convergence_plots' (bool): Plot Loss vs steps in optimisation procedure, default=False
   
   ## Returns

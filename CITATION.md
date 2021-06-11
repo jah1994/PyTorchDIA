@@ -1,7 +1,10 @@
+## Citing PyTorchDIA
+
 If you use PyTorchDIA in your work, please cite the associated paper.
 
 ## BibTex
-@article{hitchcock2021pytorchdia,
+```bibtex
+@article{hitchcock2021pytorchdia, 
   title={PyTorchDIA: a flexible, GPU-accelerated numerical approach to Difference Image Analysis},
   author={Hitchcock, James A and Hundertmark, Markus and Foreman-Mackey, Daniel and Bachelet, Etienne and Dominik, Martin and Street, Rachel and Tsapras, Yiannis},
   journal={Monthly Notices of the Royal Astronomical Society},
@@ -11,4 +14,5 @@ If you use PyTorchDIA in your work, please cite the associated paper.
   year={2021},
   publisher={Oxford University Press}
 }
+```
 

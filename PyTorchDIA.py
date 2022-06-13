@@ -98,11 +98,7 @@ def infer_kernel(R, I, flat, loss_fn, maxiter, FIM, alpha, convergence_plots, d,
       X = X.flatten()
       Y = Y.flatten()
       
-      if d == 0:
-        A = np.array([X*0+1]).T
-        def poly2Dreco(X, Y, c):
-          return c[0]
-      elif d == 1:
+      if d == 1:
         A = np.array([X*0+1, X, Y]).T      
         def poly2Dreco(X, Y, c):
           return c[0] + X*c[1] + Y*c[2]
@@ -286,7 +282,7 @@ def infer_kernel(R, I, flat, loss_fn, maxiter, FIM, alpha, convergence_plots, d,
           optimizer_Adam.step()
           
           # append loss
-          losses.append(loss.detach())
+          losses.append(loss.cpu().detach().item())
           ts.append(t)
         
         # don't take more than 250 Newton steps
@@ -311,7 +307,7 @@ def infer_kernel(R, I, flat, loss_fn, maxiter, FIM, alpha, convergence_plots, d,
                 loss = add_Laplacian_prior(model.conv.weight, loss)
            
          
-          losses.append(loss.detach())
+          losses.append(loss.cpu().detach().item())
           ts.append(t)
           
         else:

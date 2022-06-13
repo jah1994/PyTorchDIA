@@ -324,7 +324,8 @@ def infer_kernel(R, I, flat, loss_fn, maxiter, FIM, alpha, convergence_plots, d,
             print('SD steps:', SD_steps_taken)
             print('L-BFGS steps:', t - SD_steps_taken)
           except UnboundLocalError:
-              print('SD only')
+            print('SD only')
+          print('Final loss:', losses[-1])
           break
 
         elif t>100 and abs((losses[-1] - losses[-2])/losses[-2]) < Newton_tol and use_Newton == False:
